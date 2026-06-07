@@ -497,173 +497,83 @@ class DianXiaoMiAutomator:
         )
 
     async def _fill_sequential_numbers(self, start: int, need_change_color: bool, expected_count: int = 0) -> int:
-        """在弹窗中填序号 + 改颜色（二店），逐行处理确保每行的颜色下拉菜单能正确选到红色"""
+        """在弹窗中填序号 + 改颜色（二店），处理虚拟滚动和列定位"""
         await asyncio.sleep(2)
-
-        filled_count = 0
-        current = start
-        self._log(f"开始填写序号，从 {current} 开始")
 
         modal = self.page.locator(".ant-modal-content:visible").first
         if not await modal.is_visible():
             raise AutomatorError("找不到弹窗")
 
-        # 滚动让所有行加载
-        try:
-            scroll_body = modal.locator(".ant-modal-body, .ant-table-body, .vxe-table--body").first
-            if await scroll_body.is_visible(timeout=2000):
-                for _ in range(5):
-                    await scroll_body.evaluate("el => el.scrollTop += 300")
-                    await asyncio.sleep(0.3)
-                await scroll_body.evaluate("el => el.scrollTop = 0")
-                await asyncio.sleep(0.5)
-        except Exception:
-            pass
+        self._log(f"开始填写序号，从 {start} 开始（期望 {expected_count} 条）")
 
-        # ---- 第一步：一次性填完所有序号 ----
-        fill_result = await self.page.evaluate(f"""
-            () => {{
-                const startNum = {start};
-                const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
-                if (!modal) return {{ filled: 0 }};
+        # ---- 第一步：滚动 + 逐批填写序号（解决虚拟滚动问题） ----
+        filled_count = 0
+        num = start
+        no_new_count = 0
 
-                function findInput(row) {{
-                    const inp = row.querySelector('input:not([type="checkbox"]):not([type="hidden"]):not([type="search"]), textarea');
-                    if (!inp) return null;
-                    const ph = (inp.placeholder || '').trim();
-                    if (ph.includes('请选择') || inp.readOnly || inp.disabled) return null;
-                    const rect = inp.getBoundingClientRect();
-                    if (rect.width < 30 || rect.height < 10) return null;
-                    return inp;
-                }}
-
-                let num = startNum;
-                let filled = 0;
-
-                // 方式A: 找弹窗内的所有表格行
-                const tables = modal.querySelectorAll('table');
-                if (tables.length > 0) {{
-                    for (const table of tables) {{
-                        const rows = table.querySelectorAll('tr');
-                        for (const row of rows) {{
-                            if (row.offsetParent === null) continue;
-                            const inp = findInput(row);
-                            if (!inp) continue;
-                            inp.value = String(num);
-                            inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            filled++;
-                            num++;
-                        }}
-                    }}
-                    return {{ filled }};
-                }}
-
-                // 方式B: 直接找所有输入框
-                const inputs = modal.querySelectorAll('input:not([type="checkbox"]):not([type="hidden"]):not([type="search"]), textarea');
-                for (const inp of inputs) {{
-                    const ph = (inp.placeholder || '').trim();
-                    if (ph.includes('请选择') || inp.readOnly || inp.disabled) continue;
-                    const rect = inp.getBoundingClientRect();
-                    if (rect.width < 30 || rect.height < 10) continue;
-                    inp.value = String(num);
-                    inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    filled++;
-                    num++;
-                }}
-                return {{ filled }};
-            }}
-        """)
-
-        filled_count = fill_result.get("filled", 0) if isinstance(fill_result, dict) else 0
-        self._log(f"✅ 已填写 {filled_count} 个序号")
-
-        # ---- 第二步：逐行改颜色（二店） ----
-        if need_change_color and filled_count > 0:
-            self._log("正在逐行修改颜色为红色...")
-            changed = 0
-
-            # 扫描弹窗内所有可见的 .ant-select-selector（不局限于表格行）
-            selector_data = await self.page.evaluate("""
-                () => {
+        for scroll_pass in range(20):
+            newly = await self.page.evaluate(f"""
+                () => {{
                     const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
-                    if (!modal) return { count: 0, found: [] };
-                    const all = modal.querySelectorAll('.ant-select-selector');
-                    const visible = [];
-                    for (const sel of all) {
-                        const rect = sel.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            visible.push({
-                                text: (sel.innerText || '').trim().slice(0, 20),
-                                size: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
-                            });
-                        }
-                    }
-                    return { count: visible.length, found: visible };
-                }
+                    if (!modal) return 0;
+                    const all = modal.querySelectorAll('input:not([type="checkbox"]):not([type="hidden"]):not([type="search"]), textarea');
+                    let filled = 0;
+                    let currentNum = {num + filled_count};
+                    for (const inp of all) {{
+                        const ph = (inp.placeholder || '').trim();
+                        if (ph.includes('请选择') || inp.readOnly || inp.disabled) continue;
+                        const rect = inp.getBoundingClientRect();
+                        if (rect.width < 30 || rect.height < 10) continue;
+                        // vxe-table 保留已填行的值，跳过已有值的
+                        if (inp.value && inp.value.trim() !== '') continue;
+                        inp.value = String(currentNum);
+                        try {{
+                            const nativeSetter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype, 'value'
+                            ).set;
+                            nativeSetter.call(inp, String(currentNum));
+                        }} catch(e) {{
+                            inp.value = String(currentNum);
+                        }}
+                        inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        filled++;
+                        currentNum++;
+                    }}
+                    return filled;
+                }}
             """)
 
-            color_count = selector_data.get("count", 0) if isinstance(selector_data, dict) else 0
-            found = selector_data.get("found", []) if isinstance(selector_data, dict) else []
-
-            self._log(f"弹窗内可见 .ant-select-selector: {color_count} 个")
-            for i, s in enumerate(found):
-                self._log(f"  [{i}] 文字='{s['text']}' 尺寸={s['size']}")
-
-            if color_count == 0:
-                self._log("⚠️ 未检测到颜色选择器，请点击「🎨 颜色扫描」查看详情")
+            if newly > 0:
+                filled_count += newly
+                no_new_count = 0
             else:
-                # 逐个点击颜色选择器 → 选红色
-                for ri in range(color_count):
-                    try:
-                        # 点击第 ri 个颜色选择器
-                        clicked = await self.page.evaluate(f"""
-                            () => {{
-                                const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
-                                if (!modal) return false;
-                                const selectors = modal.querySelectorAll('.ant-select-selector');
-                                let idx = 0;
-                                for (const sel of selectors) {{
-                                    const rect = sel.getBoundingClientRect();
-                                    if (rect.width === 0 || rect.height === 0) continue;
-                                    if (idx === {ri}) {{
-                                        sel.click();
-                                        return true;
-                                    }}
-                                    idx++;
-                                }}
-                                return false;
-                            }}
-                        """)
+                no_new_count += 1
+                if no_new_count >= 2:
+                    self._log(f"  连续{no_new_count}轮无新行，停止滚动")
+                    break
 
-                        if not clicked:
-                            self._log(f"  ⚠️ 第 {ri+1} 个颜色选择器找不到")
-                            continue
+            if filled_count >= expected_count:
+                break
 
-                        self._log(f"  第 {ri+1} 个: 已点击，等待下拉菜单...")
-                        await asyncio.sleep(0.5)
+            # 往下滚动，触发虚拟加载
+            can_scroll = await self.page.evaluate("""
+                () => {
+                    const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
+                    if (!modal) return false;
+                    const c = modal.querySelector('.ant-table-body, .vxe-table--body, .ant-modal-body');
+                    if (!c) return false;
+                    const before = c.scrollTop;
+                    c.scrollTop += c.clientHeight * 0.8;
+                    return c.scrollTop > before;
+                }
+            """)
+            if not can_scroll and newly == 0:
+                self._log("  ⚠️ 无法继续滚动且无新行")
+                break
+            await asyncio.sleep(0.5)
 
-                        # 从当前可见的下拉菜单中选红色
-                        red_result = await self._select_red_in_dropdown()
-                        self._log(f"  第 {ri+1} 个: {red_result}")
-
-                        if 'no_' not in str(red_result):
-                            changed += 1
-
-                        await asyncio.sleep(0.3)
-
-                    except Exception as e:
-                        self._log(f"  第 {ri+1} 个改色出错: {e}")
-
-                self._log(f"🔴 颜色修改完成: {changed}/{color_count} 个已改红")
-
-        # ---- 校验数量 ----
-        if expected_count > 0 and filled_count != expected_count:
-            self._log(f"⚠️ 警告：选中 {expected_count} 条，但只填了 {filled_count} 条")
-            self._log("   可能是因为部分订单行未加载，点击「确定」提交已填部分")
-        elif expected_count > 0 and filled_count == expected_count:
-            self._log(f"✅ 数量校验通过（{filled_count} 条全部填完）")
+        self._log(f"✅ 已填写 {filled_count} 个序号（期望 {expected_count}）")
 
         if filled_count == 0:
             raise AutomatorError(
@@ -671,7 +581,130 @@ class DianXiaoMiAutomator:
                 "请确认弹窗中每一行是否有可输入的文本框"
             )
 
+        # ---- 第二步：按"颜色"列定位，逐行改色 ----
+        if need_change_color:
+            await self._change_colors_by_column()
+
+        # ---- 校验数量 ----
+        if expected_count > 0 and filled_count != expected_count:
+            self._log(f"⚠️ 警告：选中 {expected_count} 条，但只填了 {filled_count} 条")
+            self._log("   点击「确定」提交已填部分")
+        elif expected_count > 0 and filled_count == expected_count:
+            self._log(f"✅ 数量校验通过（{filled_count} 条全部填完）")
+
         return filled_count
+
+    async def _change_colors_by_column(self):
+        """按表格"颜色"列定位颜色选择器并改为红色（逐行处理，避免下拉菜单覆盖）"""
+        self._log("正在修改颜色为红色（按「颜色」列定位）...")
+        changed = 0
+
+        for scroll_pass in range(20):
+            # 统计当前可见的、未处理的颜色选择器数量
+            remaining = await self.page.evaluate("""
+                () => {
+                    const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
+                    if (!modal) return -1;
+                    const thead = modal.querySelector('thead');
+                    if (!thead) return -1;
+                    const ths = thead.querySelectorAll('th, td');
+                    let colorIdx = -1;
+                    ths.forEach((th, i) => {
+                        if (th.innerText.trim().includes('颜色')) colorIdx = i;
+                    });
+                    if (colorIdx === -1) return -1;
+                    const tbody = modal.querySelector('tbody');
+                    if (!tbody) return -1;
+                    let count = 0;
+                    for (const row of tbody.querySelectorAll('tr')) {
+                        if (row.offsetParent === null) continue;
+                        const cell = row.querySelectorAll('td')[colorIdx];
+                        if (!cell) continue;
+                        const sel = cell.querySelector('.ant-select-selector');
+                        if (!sel) continue;
+                        const r = sel.getBoundingClientRect();
+                        if (r.width === 0 || r.height === 0) continue;
+                        if (sel.dataset._colorDone) continue;
+                        count++;
+                    }
+                    return count;
+                }
+            """)
+
+            if not isinstance(remaining, int):
+                break
+
+            if remaining == 0:
+                # 当前可见行都已处理完，尝试滚动加载更多行
+                scrolled = await self.page.evaluate("""
+                    () => {
+                        const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
+                        if (!modal) return false;
+                        const c = modal.querySelector('.ant-table-body, .vxe-table--body, .ant-modal-body');
+                        if (!c) return false;
+                        const before = c.scrollTop;
+                        c.scrollTop += c.clientHeight * 0.8;
+                        return c.scrollTop > before;
+                    }
+                """)
+                if not scrolled:
+                    self._log("  无法继续滚动，颜色修改结束")
+                    break
+                await asyncio.sleep(0.5)
+                continue
+
+            if remaining < 0:
+                error_map = {-1: "找不到颜色列或表头"}
+                self._log(f"  ⚠️ {error_map.get(remaining, '未知')}")
+                break
+
+            # 逐个处理可见的未处理行（一次只点一个，避免下拉菜单覆盖）
+            for ri in range(remaining):
+                clicked = await self.page.evaluate(f"""
+                    () => {{
+                        const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
+                        if (!modal) return false;
+                        const thead = modal.querySelector('thead');
+                        if (!thead) return false;
+                        const ths = thead.querySelectorAll('th, td');
+                        let colorIdx = -1;
+                        ths.forEach((th, i) => {{
+                            if (th.innerText.trim().includes('颜色')) colorIdx = i;
+                        }});
+                        if (colorIdx === -1) return false;
+                        const tbody = modal.querySelector('tbody');
+                        if (!tbody) return false;
+                        let idx = 0;
+                        for (const row of tbody.querySelectorAll('tr')) {{
+                            if (row.offsetParent === null) continue;
+                            const cell = row.querySelectorAll('td')[colorIdx];
+                            if (!cell) continue;
+                            const sel = cell.querySelector('.ant-select-selector');
+                            if (!sel) continue;
+                            const r = sel.getBoundingClientRect();
+                            if (r.width === 0 || r.height === 0) continue;
+                            if (sel.dataset._colorDone) continue;
+                            if (idx !== {ri}) {{ idx++; continue; }}
+                            sel.click();
+                            sel.dataset._colorDone = '1';
+                            return true;
+                        }}
+                        return false;
+                    }}
+                """)
+
+                if not clicked:
+                    continue
+
+                await asyncio.sleep(0.5)
+                red_result = await self._select_red_in_dropdown()
+                status = '✅' if 'no_' not in str(red_result) else '⚠️'
+                self._log(f"  {status} {red_result}")
+                if 'no_' not in str(red_result):
+                    changed += 1
+                await asyncio.sleep(0.3)
+
+        self._log(f"🔴 颜色修改完成: {changed} 个已改红")
 
     async def _select_red_in_dropdown(self) -> str:
         """从当前页面上可见的 Ant Design 下拉菜单中选中红色选项"""
