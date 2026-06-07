@@ -516,15 +516,55 @@ class DianXiaoMiAutomator:
                 () => {{
                     const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
                     if (!modal) return 0;
-                    const all = modal.querySelectorAll('input:not([type="checkbox"]):not([type="hidden"]):not([type="search"]), textarea');
+
+                    function findInput(row) {{
+                        const inp = row.querySelector('input:not([type="checkbox"]):not([type="hidden"]):not([type="search"]), textarea');
+                        if (!inp) return null;
+                        const ph = (inp.placeholder || '').trim();
+                        if (ph.includes('请选择') || inp.readOnly || inp.disabled) return null;
+                        const rect = inp.getBoundingClientRect();
+                        if (rect.width < 30 || rect.height < 10) return null;
+                        return inp;
+                    }}
+
+                    // 方式A: 在表格行内找输入框（准确）
+                    const tables = modal.querySelectorAll('table');
                     let filled = 0;
                     let currentNum = {num + filled_count};
-                    for (const inp of all) {{
+
+                    if (tables.length > 0) {{
+                        for (const table of tables) {{
+                            const rows = table.querySelectorAll('tr');
+                            for (const row of rows) {{
+                                if (row.offsetParent === null) continue;
+                                const inp = findInput(row);
+                                if (!inp) continue;
+                                if (inp.value && inp.value.trim() !== '') continue;
+                                inp.value = String(currentNum);
+                                try {{
+                                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                                        window.HTMLInputElement.prototype, 'value'
+                                    ).set;
+                                    nativeSetter.call(inp, String(currentNum));
+                                }} catch(e) {{
+                                    inp.value = String(currentNum);
+                                }}
+                                inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                filled++;
+                                currentNum++;
+                            }}
+                        }}
+                        return filled;
+                    }}
+
+                    // 方式B: 兜底，直接找所有输入框
+                    const inputs = modal.querySelectorAll('input:not([type="checkbox"]):not([type="hidden"]):not([type="search"]), textarea');
+                    for (const inp of inputs) {{
                         const ph = (inp.placeholder || '').trim();
                         if (ph.includes('请选择') || inp.readOnly || inp.disabled) continue;
                         const rect = inp.getBoundingClientRect();
                         if (rect.width < 30 || rect.height < 10) continue;
-                        // vxe-table 保留已填行的值，跳过已有值的
                         if (inp.value && inp.value.trim() !== '') continue;
                         inp.value = String(currentNum);
                         try {{
