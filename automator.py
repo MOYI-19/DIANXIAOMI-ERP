@@ -180,41 +180,46 @@ class DianXiaoMiAutomator:
     # ==================== 店铺筛选 ====================
 
     async def _ensure_store_filter(self, store_key: str):
-        """确保店铺筛选正确——点击店铺账号筛选"""
+        """确保店铺筛选正确——点击店铺账号筛选，带重试"""
         store_name = STORES[store_key]["name"]
         self._log(f"正在筛选店铺: {store_name}")
 
-        # 方式1: 点击"店铺账号"触发筛选，再选店铺名
-        try:
-            shop_label = self.page.get_by_text("店铺账号", exact=False).first
-            if await shop_label.is_visible(timeout=3000):
-                await shop_label.click()
-                await asyncio.sleep(1)
+        for attempt in range(3):
+            # 方式1: 点击"店铺账号"触发筛选，再选店铺名
+            try:
+                shop_label = self.page.get_by_text("店铺账号", exact=False).first
+                if await shop_label.is_visible(timeout=5000):
+                    await shop_label.click()
+                    await asyncio.sleep(1)
 
-                store_option = self.page.get_by_text(store_name, exact=True).first
-                if await store_option.is_visible(timeout=3000):
-                    await store_option.click()
+                    store_option = self.page.get_by_text(store_name, exact=True).first
+                    if await store_option.is_visible(timeout=5000):
+                        await store_option.click()
+                        self._log(f"✅ 已选择店铺: {store_name}")
+                        await asyncio.sleep(2)
+                        return
+
+                    await self.page.keyboard.press("Escape")
+                    await asyncio.sleep(0.3)
+            except Exception:
+                pass
+
+            # 方式2: 直接点击店铺名称标签
+            try:
+                store_tag = self.page.get_by_text(store_name, exact=True).first
+                if await store_tag.is_visible(timeout=3000):
+                    await store_tag.click()
                     self._log(f"✅ 已选择店铺: {store_name}")
                     await asyncio.sleep(2)
                     return
+            except Exception:
+                pass
 
-                await self.page.keyboard.press("Escape")
-                await asyncio.sleep(0.3)
-        except Exception:
-            pass
-
-        # 方式2: 直接点击店铺名称标签
-        try:
-            store_tag = self.page.get_by_text(store_name, exact=True).first
-            if await store_tag.is_visible(timeout=3000):
-                await store_tag.click()
-                self._log(f"✅ 已选择店铺: {store_name}")
+            if attempt < 2:
+                self._log(f"  第{attempt+1}次尝试失败，重试中...")
                 await asyncio.sleep(2)
-                return
-        except Exception:
-            pass
 
-        self._log("⚠️ 未能自动筛选店铺")
+        self._log("⚠️ 未能自动筛选店铺（尝试3次均失败）")
         self._log("   请手动点击页面上方的「店铺账号」→ 选择对应店铺后重试")
 
     # ==================== 批量拣货说明 ====================
@@ -527,7 +532,6 @@ class DianXiaoMiAutomator:
                     if (!inp) return null;
                     const ph = (inp.placeholder || '').trim();
                     if (ph.includes('请选择') || inp.readOnly || inp.disabled) return null;
-                    // 过滤掉太小的输入框（可能是隐藏尺寸的占位元素）
                     const rect = inp.getBoundingClientRect();
                     if (rect.width < 30 || rect.height < 10) return null;
                     return inp;
@@ -580,72 +584,79 @@ class DianXiaoMiAutomator:
             self._log("正在逐行修改颜色为红色...")
             changed = 0
 
-            # 获取弹窗中所有包含 .ant-select-selector 的行数
-            color_row_count = await self.page.evaluate("""
+            # 扫描弹窗内所有可见的 .ant-select-selector（不局限于表格行）
+            selector_data = await self.page.evaluate("""
                 () => {
                     const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
-                    if (!modal) return 0;
-                    let count = 0;
-                    const tables = modal.querySelectorAll('table');
-                    for (const table of tables) {
-                        const rows = table.querySelectorAll('tr');
-                        for (const row of rows) {
-                            if (row.offsetParent === null) continue;
-                            if (row.querySelector('.ant-select-selector')) count++;
+                    if (!modal) return { count: 0, found: [] };
+                    const all = modal.querySelectorAll('.ant-select-selector');
+                    const visible = [];
+                    for (const sel of all) {
+                        const rect = sel.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            visible.push({
+                                text: (sel.innerText || '').trim().slice(0, 20),
+                                size: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
+                            });
                         }
                     }
-                    return count;
+                    return { count: visible.length, found: visible };
                 }
             """)
 
-            self._log(f"弹窗中有颜色选择器的行: {color_row_count}")
+            color_count = selector_data.get("count", 0) if isinstance(selector_data, dict) else 0
+            found = selector_data.get("found", []) if isinstance(selector_data, dict) else []
 
-            for ri in range(color_row_count):
-                try:
-                    # 点击第 ri 行的颜色选择器
-                    clicked = await self.page.evaluate(f"""
-                        () => {{
-                            const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
-                            if (!modal) return false;
-                            const tables = modal.querySelectorAll('table');
-                            let idx = 0;
-                            for (const table of tables) {{
-                                const rows = table.querySelectorAll('tr');
-                                for (const row of rows) {{
-                                    if (row.offsetParent === null) continue;
-                                    const sel = row.querySelector('.ant-select-selector');
-                                    if (!sel) continue;
+            self._log(f"弹窗内可见 .ant-select-selector: {color_count} 个")
+            for i, s in enumerate(found):
+                self._log(f"  [{i}] 文字='{s['text']}' 尺寸={s['size']}")
+
+            if color_count == 0:
+                self._log("⚠️ 未检测到颜色选择器，请点击「🎨 颜色扫描」查看详情")
+            else:
+                # 逐个点击颜色选择器 → 选红色
+                for ri in range(color_count):
+                    try:
+                        # 点击第 ri 个颜色选择器
+                        clicked = await self.page.evaluate(f"""
+                            () => {{
+                                const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
+                                if (!modal) return false;
+                                const selectors = modal.querySelectorAll('.ant-select-selector');
+                                let idx = 0;
+                                for (const sel of selectors) {{
+                                    const rect = sel.getBoundingClientRect();
+                                    if (rect.width === 0 || rect.height === 0) continue;
                                     if (idx === {ri}) {{
                                         sel.click();
                                         return true;
                                     }}
                                     idx++;
                                 }}
+                                return false;
                             }}
-                            return false;
-                        }}
-                    """)
+                        """)
 
-                    if not clicked:
-                        self._log(f"  ⚠️ 第 {ri+1} 行找不到颜色选择器")
-                        continue
+                        if not clicked:
+                            self._log(f"  ⚠️ 第 {ri+1} 个颜色选择器找不到")
+                            continue
 
-                    self._log(f"  第 {ri+1} 行: 已点击颜色选择器，等待下拉菜单...")
-                    await asyncio.sleep(0.5)
+                        self._log(f"  第 {ri+1} 个: 已点击，等待下拉菜单...")
+                        await asyncio.sleep(0.5)
 
-                    # 从当前可见的下拉菜单中选红色
-                    red_result = await self._select_red_in_dropdown()
-                    self._log(f"  第 {ri+1} 行: 选色结果 {red_result}")
+                        # 从当前可见的下拉菜单中选红色
+                        red_result = await self._select_red_in_dropdown()
+                        self._log(f"  第 {ri+1} 个: {red_result}")
 
-                    if 'no_' not in str(red_result):
-                        changed += 1
+                        if 'no_' not in str(red_result):
+                            changed += 1
 
-                    await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.3)
 
-                except Exception as e:
-                    self._log(f"  第 {ri+1} 行改色出错: {e}")
+                    except Exception as e:
+                        self._log(f"  第 {ri+1} 个改色出错: {e}")
 
-            self._log(f"🔴 颜色修改完成: {changed}/{color_row_count} 行已改红")
+                self._log(f"🔴 颜色修改完成: {changed}/{color_count} 个已改红")
 
         # ---- 校验数量 ----
         if expected_count > 0 and filled_count != expected_count:
@@ -664,39 +675,60 @@ class DianXiaoMiAutomator:
 
     async def _select_red_in_dropdown(self) -> str:
         """从当前页面上可见的 Ant Design 下拉菜单中选中红色选项"""
+        await asyncio.sleep(0.2)
+
         result = await self.page.evaluate("""
             () => {
-                // 找到当前可见的 Ant Design 下拉菜单
-                const dropdown = document.querySelector(
-                    '.ant-select-dropdown:not([style*="display: none"])'
-                );
+                // 兜底：额外检查页面所有下拉菜单，用 visible 判断而非 inline style
+                function isVisible(el) {
+                    if (!el || el.offsetParent !== null) return true;
+                    // offsetParent 为 null 时，再检查 getBoundingClientRect
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+
+                // 找当前页面中可见的 Ant Design 下拉菜单
+                // 注意：不能用 [style*="display: none"]，因为 Ant Design 用 CSS class 隐藏
+                const allDropdowns = document.querySelectorAll('.ant-select-dropdown');
+                let dropdown = null;
+                for (const dd of allDropdowns) {
+                    if (isVisible(dd)) {
+                        dropdown = dd;
+                        break;
+                    }
+                }
+
                 if (!dropdown) return 'no_dropdown';
 
                 const options = dropdown.querySelectorAll('.ant-select-item-option');
+                const results = [];
 
                 for (const opt of options) {
-                    // 检查该选项的所有后代元素是否有红色背景
                     const all = opt.querySelectorAll('*');
                     for (const el of all) {
                         const s = (el.getAttribute('style') || '').toLowerCase().replace(/\\s+/g, '');
 
-                        // 方式1: 内联样式写 background:red 或 background-color:red
+                        // 内联样式: background:red / background-color:red
                         if (s.includes('background:red') || s.includes('background-color:red')) {
                             opt.click(); return 'inline_red';
                         }
 
-                        // 方式2: 内联样式写 background:#ff...（以ff开头的hex颜色）
-                        if (/background(?:-color)?:#f[0-9a-f]{5}[;)]/i.test(s) ||
-                            /background(?:-color)?:#f00[;)]/i.test(s)) {
+                        // 内联样式: background:#ffxxxx（以 #f 开头的 hex 红色系）
+                        if (/background(?:-color)?:#f[0-9a-f]{5}[;)]/i.test(s)) {
                             opt.click(); return 'inline_hex_ff';
                         }
 
-                        // 方式3: 内联样式写 background:rgb(255, 或 rgb(25x,
-                        if (/background(?:-color)?:rgb\\(\\s*2(?:5[0-5]|[0-4]\\d)\\s*,/.test(s)) {
+                        // 内联样式: background:#f00 (short hex red)
+                        if (/background(?:-color)?:#f00[;)]/i.test(s)) {
+                            opt.click(); return 'inline_hex_short';
+                        }
+
+                        // 内联样式: background:rgb(255, 或 rgb(254, 等——R≈255, G≈0
+                        if (/background(?:-color)?:rgb\\(\\s*2(?:5[0-5]|[0-4]\\d)\\s*,\\s*(?:[0-9]|[1-9]\\d?)\\s*,\\s*(?:[0-9]|[1-9]\\d?)\\s*\\)/.test(s)) {
                             opt.click(); return 'inline_rgb_red';
                         }
 
-                        // 方式4: 计算样式检查
+                        // 计算样式: computed background-color 检查
                         try {
                             const bg = window.getComputedStyle(el).backgroundColor;
                             if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') {
@@ -705,28 +737,48 @@ class DianXiaoMiAutomator:
                                     const r = parseInt(match[1]);
                                     const g = parseInt(match[2]);
                                     const b = parseInt(match[3]);
-                                    // 红色判断：R显著大于G和B
                                     if (r > 180 && g < 100 && b < 100) {
                                         opt.click(); return 'computed_red';
                                     }
+                                    // 记录非红色的背景色，用于调试
+                                    results.push({idx: results.length, r, g, b, bg});
                                 }
                             }
                         } catch(e) {}
                     }
                 }
 
-                // 兜底策略：点最后一个选项（按惯例红色常在最后）
-                if (options.length >= 2) {
-                    options[options.length - 1].click();
-                    return 'fallback_last';
-                }
-                if (options.length === 1) {
-                    options[0].click();
-                    return 'fallback_only';
-                }
-                return 'no_red';
+                // 调试：记录所有选项的背景色信息
+                return JSON.stringify({found: results.map(r => `rgb(${r.r},${r.g},${r.b})`) });
             }
         """)
+
+        # 检查结果是否是 JSON 字符串（调试输出）
+        if isinstance(result, str) and result.startswith('{'):
+            self._log(f"  颜色检测详情: {result}")
+            # 兜底：点最后一个选项
+            self._log(f"  尝试点击最后一个选项...")
+            last_result = await self.page.evaluate("""
+                () => {
+                    function isVisible(el) {
+                        if (!el || el.offsetParent !== null) return true;
+                        const rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    }
+                    const allDropdowns = document.querySelectorAll('.ant-select-dropdown');
+                    let dropdown = null;
+                    for (const dd of allDropdowns) {
+                        if (isVisible(dd)) { dropdown = dd; break; }
+                    }
+                    if (!dropdown) return 'no_dropdown_final';
+                    const opts = dropdown.querySelectorAll('.ant-select-item-option');
+                    if (opts.length >= 2) { opts[opts.length - 1].click(); return 'fallback_last'; }
+                    if (opts.length === 1) { opts[0].click(); return 'fallback_only'; }
+                    return 'no_option';
+                }
+            """)
+            return last_result or 'fallback_none'
+
         return result or 'no_result'
 
     async def _click_confirm(self):
