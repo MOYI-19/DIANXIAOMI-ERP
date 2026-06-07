@@ -635,47 +635,48 @@ class DianXiaoMiAutomator:
         return filled_count
 
     async def _change_colors_by_column(self):
-        """按表格"颜色"列定位颜色选择器并改为红色（逐行处理，避免下拉菜单覆盖）"""
-        self._log("正在修改颜色为红色（按「颜色」列定位）...")
+        """逐行修改颜色：每行内排除「请选择模板」下拉框，剩下的 selector 就是颜色选择器"""
+        self._log("正在修改颜色为红色...")
         changed = 0
 
         for scroll_pass in range(20):
-            # 统计当前可见的、未处理的颜色选择器数量
+            # 找当前可见行中，排除了"请选择模板"后的颜色选择器
             remaining = await self.page.evaluate("""
                 () => {
                     const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
                     if (!modal) return -1;
-                    const thead = modal.querySelector('thead');
-                    if (!thead) return -1;
-                    const ths = thead.querySelectorAll('th, td');
-                    let colorIdx = -1;
-                    ths.forEach((th, i) => {
-                        if (th.innerText.trim().includes('颜色')) colorIdx = i;
+
+                    // 找所有表格行（兼容标准 table 和 vxe-table）
+                    let rows = [];
+                    modal.querySelectorAll('table').forEach(t => {
+                        t.querySelectorAll('tr').forEach(tr => {
+                            if (tr.offsetParent !== null) rows.push(tr);
+                        });
                     });
-                    if (colorIdx === -1) return -1;
-                    const tbody = modal.querySelector('tbody');
-                    if (!tbody) return -1;
+
                     let count = 0;
-                    for (const row of tbody.querySelectorAll('tr')) {
+                    for (const row of rows) {
                         if (row.offsetParent === null) continue;
-                        const cell = row.querySelectorAll('td')[colorIdx];
-                        if (!cell) continue;
-                        const sel = cell.querySelector('.ant-select-selector');
-                        if (!sel) continue;
-                        const r = sel.getBoundingClientRect();
-                        if (r.width === 0 || r.height === 0) continue;
-                        if (sel.dataset._colorDone) continue;
-                        count++;
+                        const selectors = row.querySelectorAll('.ant-select-selector');
+                        for (const sel of selectors) {
+                            // 排除"请选择模板"（内容列的下拉框）
+                            const text = (sel.innerText || '').trim();
+                            if (text.includes('请选择')) continue;
+                            const r = sel.getBoundingClientRect();
+                            if (r.width === 0 || r.height === 0) continue;
+                            if (sel.dataset._colorDone) continue;
+                            count++;
+                        }
                     }
                     return count;
                 }
             """)
 
-            if not isinstance(remaining, int):
+            if not isinstance(remaining, int) or remaining < 0:
                 break
 
             if remaining == 0:
-                # 当前可见行都已处理完，尝试滚动加载更多行
+                # 当前可见行都已处理完，尝试滚动
                 scrolled = await self.page.evaluate("""
                     () => {
                         const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
@@ -693,41 +694,34 @@ class DianXiaoMiAutomator:
                 await asyncio.sleep(0.5)
                 continue
 
-            if remaining < 0:
-                error_map = {-1: "找不到颜色列或表头"}
-                self._log(f"  ⚠️ {error_map.get(remaining, '未知')}")
-                break
-
-            # 逐个处理可见的未处理行（一次只点一个，避免下拉菜单覆盖）
+            # 逐个处理当前可见行
             for ri in range(remaining):
                 clicked = await self.page.evaluate(f"""
                     () => {{
                         const modal = document.querySelector('.ant-modal-content:not([style*="display: none"])');
                         if (!modal) return false;
-                        const thead = modal.querySelector('thead');
-                        if (!thead) return false;
-                        const ths = thead.querySelectorAll('th, td');
-                        let colorIdx = -1;
-                        ths.forEach((th, i) => {{
-                            if (th.innerText.trim().includes('颜色')) colorIdx = i;
+
+                        let rows = [];
+                        modal.querySelectorAll('table').forEach(t => {{
+                            t.querySelectorAll('tr').forEach(tr => {{
+                                if (tr.offsetParent !== null) rows.push(tr);
+                            }});
                         }});
-                        if (colorIdx === -1) return false;
-                        const tbody = modal.querySelector('tbody');
-                        if (!tbody) return false;
+
                         let idx = 0;
-                        for (const row of tbody.querySelectorAll('tr')) {{
-                            if (row.offsetParent === null) continue;
-                            const cell = row.querySelectorAll('td')[colorIdx];
-                            if (!cell) continue;
-                            const sel = cell.querySelector('.ant-select-selector');
-                            if (!sel) continue;
-                            const r = sel.getBoundingClientRect();
-                            if (r.width === 0 || r.height === 0) continue;
-                            if (sel.dataset._colorDone) continue;
-                            if (idx !== {ri}) {{ idx++; continue; }}
-                            sel.click();
-                            sel.dataset._colorDone = '1';
-                            return true;
+                        for (const row of rows) {{
+                            const selectors = row.querySelectorAll('.ant-select-selector');
+                            for (const sel of selectors) {{
+                                const text = (sel.innerText || '').trim();
+                                if (text.includes('请选择')) continue;
+                                const r = sel.getBoundingClientRect();
+                                if (r.width === 0 || r.height === 0) continue;
+                                if (sel.dataset._colorDone) continue;
+                                if (idx !== {ri}) {{ idx++; continue; }}
+                                sel.click();
+                                sel.dataset._colorDone = '1';
+                                return true;
+                            }}
                         }}
                         return false;
                     }}
